@@ -3,6 +3,8 @@ name: Atualizar cache GTFS
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - gtfs-cache.json
   workflow_dispatch:
   schedule:
     - cron: "17 6 * * *"
@@ -21,9 +23,20 @@ jobs:
         run: |
           set -e
           mkdir -p /tmp/gtfs
-          curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+
+          # Fonte oficial da SMTR. O ArcGIS está respondendo 403 no runner do GitHub,
+          # então usamos o espelho da MobilityDatabase como fallback.
+          if curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
             "https://www.arcgis.com/sharing/rest/content/items/8ffe62ad3b2f42e49814bf941654ea6c/data" \
-            -o /tmp/gtfs/oficial.zip
+            -o /tmp/gtfs/oficial.zip; then
+            echo "GTFS baixado diretamente da fonte da SMTR."
+          else
+            echo "ArcGIS indisponível para o runner. Usando espelho da MobilityDatabase."
+            curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+              "https://files.mobilitydatabase.org/mdb-1791/mdb-1791-202608080056/mdb-1791-202608080056.zip" \
+              -o /tmp/gtfs/oficial.zip
+          fi
+
           unzip -t /tmp/gtfs/oficial.zip >/dev/null
 
       - name: Gerar cache compacto
