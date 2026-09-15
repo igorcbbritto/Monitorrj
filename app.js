@@ -4,17 +4,17 @@ const LIVE_WINDOW_MINUTES = 5;
 const REFRESH_SECONDS = 60;
 
 const map = L.map("map").setView([-22.9068, -43.1729], 11);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap contributors"
-}).addTo(map);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
 
 let routeLine = null;
 let stopMarkers = [];
 let vehicleMarkers = [];
 let routesCache = [];
+let gtfsCache = null;
 let selectedLine = null;
+let selectedRoute = null;
 let seconds = REFRESH_SECONDS;
+let dataSource = "";
 
 function normalizeNumber(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -22,20 +22,16 @@ function normalizeNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function formatApiDate(date) {
-  return date.toISOString().slice(0, 19).replace("T", "+");
-}
+function formatApiDate(date) { return date.toISOString().slice(0, 19).replace("T", "+"); }
 
 async function fetchJson(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch(url, { cache: "no-store", signal: controller.signal });
-    if (!response.ok) throw new Error(`API ${response.status} em ${url}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+  } finally { clearTimeout(timeout); }
 }
 
 function pageResults(data) {
@@ -47,98 +43,67 @@ function pageResults(data) {
 
 function normalizeNextUrl(next) {
   if (!next) return null;
-  try {
-    const url = new URL(next, API_BASE);
-    // Evita mixed content caso o servidor devolva o link de paginação em HTTP.
-    url.protocol = "https:";
-    return url.toString();
-  } catch {
-    return null;
-  }
+  try { const u = new URL(next, API_BASE); u.protocol = "https:"; return u.toString(); } catch { return null; }
 }
 
 async function apiGetAll(path, maxPages = 50) {
   let url = path.startsWith("http") ? path : `${API_BASE}${path}`;
   const all = [];
-
   for (let page = 0; page < maxPages && url; page++) {
     const data = await fetchJson(url);
     all.push(...pageResults(data));
     url = data && !Array.isArray(data) ? normalizeNextUrl(data.next) : null;
   }
-
   return all;
 }
 
-async function loadRealRoutes() {
-  if (routesCache.length) return routesCache;
+async function loadLocalGtfs() {
+  if (gtfsCache) return gtfsCache;
+  const data = await fetchJson(`./gtfs-cache.json?v=${Date.now()}`);
+  if (!Array.isArray(data.routes) || !data.routes.length) throw new Error("Cache GTFS vazio.");
+  gtfsCache = data;
+  return data;
+}
 
-  // A API oficial usa DRF e pode paginar o GTFS. O paginador é seguido acima.
-  const data = await apiGetAll("/gtfs/routes/", 20);
-  routesCache = data
-    .map(route => ({
+function mapCacheRoutes(data) {
+  return data.routes.map(route => ({
+    route_id: route.route_id,
+    short_name: String(route.short_name || "").trim(),
+    long_name: String(route.long_name || "").trim(),
+    color: route.color || null,
+    text_color: route.text_color || null,
+    trips: route.trips || []
+  })).filter(r => r.route_id && r.short_name)
+    .sort((a, b) => a.short_name.localeCompare(b.short_name, "pt-BR", { numeric: true }));
+}
+
+async function loadRealRoutes() {
+  try {
+    const data = await apiGetAll("/gtfs/routes/", 20);
+    const routes = data.map(route => ({
       route_id: route.route_id,
       short_name: String(route.route_short_name ?? "").trim(),
       long_name: String(route.route_long_name ?? "").trim(),
       color: route.route_color || null,
       text_color: route.route_text_color || null
-    }))
-    .filter(route => route.route_id && route.short_name)
-    .sort((a, b) => a.short_name.localeCompare(b.short_name, "pt-BR", { numeric: true }));
-
-  if (!routesCache.length) throw new Error("A API respondeu, mas não retornou linhas GTFS.");
-  return routesCache;
-}
-
-async function loadTripsForLine(line) {
-  const encoded = encodeURIComponent(line);
-  return apiGetAll(`/gtfs/trips/?trip_short_name=${encoded}`, 30);
-}
-
-async function loadTripDetails(tripId) {
-  const encoded = encodeURIComponent(tripId);
-  const trips = await apiGetAll(`/gtfs/trips/?trip_id=${encoded}`, 5);
-  return trips[0] || null;
-}
-
-async function loadStopsAndShapeForTrip(tripId) {
-  const encoded = encodeURIComponent(tripId);
-  const stopTimes = await apiGetAll(`/gtfs/stop_times/?trip_id=${encoded}`, 30);
-  const trip = await loadTripDetails(tripId);
-
-  const orderedStopData = stopTimes
-    .sort((a, b) => Number(a.stop_sequence ?? 0) - Number(b.stop_sequence ?? 0))
-    .map(item => {
-      const stop = item.stop_id;
-      if (!stop || typeof stop !== "object") return null;
-      return {
-        id: stop.stop_id,
-        name: stop.stop_name || "Parada sem nome",
-        lat: normalizeNumber(stop.stop_lat),
-        lon: normalizeNumber(stop.stop_lon)
-      };
-    })
-    .filter(stop => stop && stop.lat !== null && stop.lon !== null);
-
-  let shape = [];
-  if (trip?.shape_id) {
-    const shapeData = await apiGetAll(`/gtfs/shapes/?shape_id=${encodeURIComponent(trip.shape_id)}`, 30);
-    shape = shapeData
-      .sort((a, b) => Number(a.shape_pt_sequence ?? 0) - Number(b.shape_pt_sequence ?? 0))
-      .map(point => [normalizeNumber(point.shape_pt_lat), normalizeNumber(point.shape_pt_lon)])
-      .filter(point => point[0] !== null && point[1] !== null);
+    })).filter(r => r.route_id && r.short_name)
+      .sort((a, b) => a.short_name.localeCompare(b.short_name, "pt-BR", { numeric: true }));
+    if (!routes.length) throw new Error("API sem linhas.");
+    routesCache = routes;
+    dataSource = "API SMTR";
+  } catch (apiError) {
+    console.warn("API GTFS indisponível, usando cache local:", apiError);
+    const local = await loadLocalGtfs();
+    routesCache = mapCacheRoutes(local);
+    dataSource = "cache GTFS oficial";
   }
-
-  return { shape, stops: orderedStopData, trip };
+  return routesCache;
 }
 
 function searchRoutes(query = "") {
   const q = query.trim().toLowerCase();
   if (!q) return routesCache.slice(0, 100);
-  return routesCache.filter(route =>
-    route.short_name.toLowerCase().includes(q) ||
-    route.long_name.toLowerCase().includes(q)
-  ).slice(0, 100);
+  return routesCache.filter(r => r.short_name.toLowerCase().includes(q) || r.long_name.toLowerCase().includes(q)).slice(0, 100);
 }
 
 function addRouteButton(route) {
@@ -149,64 +114,91 @@ function addRouteButton(route) {
   document.getElementById("routes").appendChild(btn);
 }
 
-async function loadRoutes() {
-  const box = document.getElementById("routes");
-  box.innerHTML = "<p>Carregando todas as linhas oficiais...</p>";
-  document.getElementById("status").textContent = "Carregando GTFS oficial...";
-
-  try {
-    await loadRealRoutes();
-    renderRouteSearchResults();
-    document.getElementById("status").textContent = `SMTR · ${routesCache.length} linhas carregadas`;
-  } catch (error) {
-    console.error("Falha ao carregar GTFS SMTR:", error);
-    box.innerHTML = `<p>Não foi possível carregar o GTFS da SMTR.<br><small>${error.message || "Verifique a conexão e tente novamente."}</small></p>`;
-    document.getElementById("status").textContent = "GTFS indisponível";
-  }
-}
-
 function renderRouteSearchResults() {
-  const q = document.getElementById("search").value;
   const box = document.getElementById("routes");
-  const routes = searchRoutes(q);
+  const routes = searchRoutes(document.getElementById("search").value);
   box.innerHTML = "";
-
-  if (!routes.length) {
-    box.innerHTML = "<p>Nenhuma linha oficial encontrada.</p>";
-    return;
-  }
+  if (!routes.length) { box.innerHTML = "<p>Nenhuma linha encontrada.</p>"; return; }
   routes.forEach(addRouteButton);
 }
 
+function getCachedTrip(route) {
+  if (!route?.trips?.length) return null;
+  return route.trips[0];
+}
+
+async function loadApiTripData(line) {
+  const encoded = encodeURIComponent(line);
+  const trips = await apiGetAll(`/gtfs/trips/?trip_short_name=${encoded}`, 30);
+  const valid = trips.filter(t => t.trip_id);
+  if (!valid.length) throw new Error(`Nenhuma viagem GTFS para ${line}.`);
+  const byDirection = new Map();
+  valid.forEach(t => { const d = String(t.direction_id ?? "0"); if (!byDirection.has(d)) byDirection.set(d, t); });
+  const trip = [...byDirection.values()][0] || valid[0];
+  const stopTimes = await apiGetAll(`/gtfs/stop_times/?trip_id=${encodeURIComponent(trip.trip_id)}`, 30);
+  const stops = stopTimes.sort((a,b) => Number(a.stop_sequence||0)-Number(b.stop_sequence||0)).map(item => {
+    const s = item.stop_id;
+    if (!s || typeof s !== "object") return null;
+    return { id:s.stop_id, name:s.stop_name||"Parada sem nome", lat:normalizeNumber(s.stop_lat), lon:normalizeNumber(s.stop_lon) };
+  }).filter(s => s && s.lat !== null && s.lon !== null);
+  let shape = [];
+  if (trip.shape_id) {
+    const points = await apiGetAll(`/gtfs/shapes/?shape_id=${encodeURIComponent(trip.shape_id)}`, 30);
+    shape = points.sort((a,b)=>Number(a.shape_pt_sequence||0)-Number(b.shape_pt_sequence||0)).map(p=>[normalizeNumber(p.shape_pt_lat),normalizeNumber(p.shape_pt_lon)]).filter(p=>p[0]!==null&&p[1]!==null);
+  }
+  return { shape, stops, trip };
+}
+
+async function getRouteData(route) {
+  if (dataSource === "cache GTFS oficial") {
+    const trip = getCachedTrip(route);
+    if (!trip) throw new Error("Esta linha não possui trajeto no cache GTFS.");
+    return { shape: trip.shape || [], stops: trip.stops || [], trip };
+  }
+  try { return await loadApiTripData(route.short_name); }
+  catch (e) {
+    const local = await loadLocalGtfs();
+    const cached = mapCacheRoutes(local).find(r => r.short_name === route.short_name);
+    const trip = getCachedTrip(cached);
+    if (!trip) throw e;
+    dataSource = "cache GTFS oficial";
+    return { shape: trip.shape || [], stops: trip.stops || [], trip };
+  }
+}
+
+async function loadRoutes() {
+  const box = document.getElementById("routes");
+  box.innerHTML = "<p>Carregando linhas oficiais...</p>";
+  document.getElementById("status").textContent = "Carregando dados oficiais...";
+  try {
+    await loadRealRoutes();
+    renderRouteSearchResults();
+    document.getElementById("status").textContent = `SMTR · ${routesCache.length} linhas · ${dataSource}`;
+  } catch (error) {
+    console.error(error);
+    box.innerHTML = `<p>Não foi possível carregar as linhas.<br><small>${error.message || "Tente novamente."}</small></p>`;
+    document.getElementById("status").textContent = "Dados GTFS indisponíveis";
+  }
+}
+
 async function selectRoute(route) {
+  selectedRoute = route;
   selectedLine = route.short_name;
   seconds = REFRESH_SECONDS;
   document.getElementById("details").classList.remove("hidden");
   document.getElementById("routeTitle").textContent = `Linha ${route.short_name}`;
   document.getElementById("routeDirection").textContent = route.long_name || "Dados oficiais da SMTR";
-  document.getElementById("status").textContent = "Carregando trajeto oficial...";
+  document.getElementById("status").textContent = "Carregando trajeto...";
   clearMap();
   document.getElementById("vehicles").innerHTML = "<p>Carregando trajeto e GPS...</p>";
-
   try {
-    const trips = await loadTripsForLine(selectedLine);
-    const validTrips = trips.filter(trip => trip.trip_id);
-    if (!validTrips.length) throw new Error(`A SMTR não retornou viagens GTFS para ${selectedLine}.`);
-
-    const tripByDirection = new Map();
-    validTrips.forEach(trip => {
-      const direction = String(trip.direction_id ?? "0");
-      if (!tripByDirection.has(direction)) tripByDirection.set(direction, trip);
-    });
-
-    const selectedTrip = [...tripByDirection.values()][0] || validTrips[0];
-    const routeData = await loadStopsAndShapeForTrip(selectedTrip.trip_id);
+    const routeData = await getRouteData(route);
     drawRoute(routeData.shape, routeData.stops);
     await refreshVehicles();
   } catch (error) {
     console.error(error);
-    document.getElementById("status").textContent = "Erro no GTFS";
-    document.getElementById("vehicles").innerHTML = `<p>${error.message || "Não foi possível carregar a rota oficial."}</p>`;
+    document.getElementById("status").textContent = "Trajeto indisponível";
+    document.getElementById("vehicles").innerHTML = `<p>${error.message || "Não foi possível carregar o trajeto."}</p>`;
   }
 }
 
@@ -215,137 +207,84 @@ function drawRoute(shape, stops) {
     routeLine = L.polyline(shape, { weight: 5 }).addTo(map);
     map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
   } else if (stops.length >= 2) {
-    const points = stops.map(stop => [stop.lat, stop.lon]);
-    routeLine = L.polyline(points, { weight: 5, dashArray: "8 6" }).addTo(map);
+    routeLine = L.polyline(stops.map(s=>[s.lat,s.lon]), { weight: 5, dashArray: "8 6" }).addTo(map);
     map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
   }
-
-  stops.forEach((stop, index) => {
-    const marker = L.circleMarker([stop.lat, stop.lon], { radius: 4 }).addTo(map);
-    marker.bindPopup(`<b>${index + 1}. ${stop.name}</b>`);
+  stops.forEach((stop,index) => {
+    const marker = L.circleMarker([stop.lat,stop.lon], {radius:4}).addTo(map);
+    marker.bindPopup(`<b>${index+1}. ${stop.name}</b>`);
     stopMarkers.push(marker);
   });
 }
 
+function normalizeLine(value) { return String(value ?? "").trim().toUpperCase().replace(/\s+/g, ""); }
+
 function normalizeLiveVehicle(item) {
-  const lat = normalizeNumber(item.latitude);
-  const lon = normalizeNumber(item.longitude);
-  if (lat === null || lon === null) return null;
-
-  const speed = normalizeNumber(item.velocidade);
-  const rawDate = item.datetime ?? item.datahora ?? item.timestamp_gps;
-  let updated = "agora";
-  let timestamp = 0;
-
-  if (rawDate) {
-    const date = new Date(rawDate);
-    if (!Number.isNaN(date.getTime())) {
-      timestamp = date.getTime();
-      updated = date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    }
-  }
-
-  return { id: item.id_veiculo ?? item.ordem ?? "Veículo", lat, lon, speed: speed ?? 0, updated, timestamp };
-}
-
-function normalizeLine(value) {
-  return String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
+  const lat=normalizeNumber(item.latitude), lon=normalizeNumber(item.longitude);
+  if(lat===null||lon===null) return null;
+  const speed=normalizeNumber(item.velocidade);
+  const raw=item.datetime ?? item.datahora ?? item.timestamp_gps;
+  let timestamp=0, updated="agora";
+  if(raw){ const d=new Date(raw); if(!Number.isNaN(d.getTime())){timestamp=d.getTime();updated=d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit",second:"2-digit"});} }
+  return {id:item.id_veiculo ?? item.ordem ?? "Veículo",lat,lon,speed:speed??0,updated,timestamp};
 }
 
 async function fetchLiveVehicles(line) {
-  const now = new Date();
-  const start = new Date(now.getTime() - LIVE_WINDOW_MINUTES * 60 * 1000);
-  const params = new URLSearchParams({ dataInicial: formatApiDate(start), dataFinal: formatApiDate(now) });
-
-  const response = await fetch(`${GPS_API}?${params.toString()}`, { cache: "no-store" });
-  if (!response.ok) throw new Error(`GPS SMTR HTTP ${response.status}`);
-
-  const data = await response.json();
-  const rawItems = Array.isArray(data) ? data : (data.veiculos || data.data || []);
-  const wantedLine = normalizeLine(line);
-  const latest = new Map();
-
-  rawItems.forEach(item => {
-    const itemLine = normalizeLine(item.servico ?? item.linha ?? item.route_short_name);
-    if (itemLine !== wantedLine) return;
-
-    const vehicle = normalizeLiveVehicle(item);
-    if (!vehicle) return;
-    const key = String(vehicle.id);
-    const previous = latest.get(key);
-    if (!previous || vehicle.timestamp >= previous.timestamp) latest.set(key, vehicle);
+  const now=new Date(), start=new Date(now.getTime()-LIVE_WINDOW_MINUTES*60000);
+  const params=new URLSearchParams({dataInicial:formatApiDate(start),dataFinal:formatApiDate(now)});
+  const response=await fetch(`${GPS_API}?${params.toString()}`,{cache:"no-store"});
+  if(!response.ok) throw new Error(`GPS SMTR HTTP ${response.status}`);
+  const data=await response.json();
+  const rawItems=Array.isArray(data)?data:(data.veiculos||data.data||[]);
+  const wanted=normalizeLine(line), latest=new Map();
+  rawItems.forEach(item=>{
+    const itemLine=normalizeLine(item.servico ?? item.linha ?? item.route_short_name);
+    if(itemLine!==wanted) return;
+    const v=normalizeLiveVehicle(item); if(!v) return;
+    const key=String(v.id), previous=latest.get(key);
+    if(!previous||v.timestamp>=previous.timestamp) latest.set(key,v);
   });
-
   return Array.from(latest.values());
 }
 
 async function refreshVehicles() {
-  if (!selectedLine) return;
-  document.getElementById("status").textContent = "Atualizando GPS...";
-
+  if(!selectedLine) return;
   try {
-    const vehicles = await fetchLiveVehicles(selectedLine);
+    const vehicles=await fetchLiveVehicles(selectedLine);
     renderVehicles(vehicles);
-    document.getElementById("status").textContent = "GPS real · SMTR";
-  } catch (error) {
+    document.getElementById("status").textContent=`GPS real · SMTR · ${dataSource}`;
+  } catch(error) {
     console.error(error);
-    document.getElementById("status").textContent = "GPS indisponível";
+    document.getElementById("status").textContent=`GPS indisponível · ${dataSource}`;
     renderVehicles([]);
   }
-  seconds = REFRESH_SECONDS;
+  seconds=REFRESH_SECONDS;
 }
 
 function renderVehicles(vehicles) {
-  const box = document.getElementById("vehicles");
-  box.innerHTML = `<h3>Ônibus encontrados: ${vehicles.length}</h3>`;
-  vehicleMarkers.forEach(marker => map.removeLayer(marker));
-  vehicleMarkers = [];
-
-  if (!vehicles.length) {
-    const empty = document.createElement("p");
-    empty.textContent = "Nenhum ônibus desta linha foi localizado nos últimos 5 minutos.";
-    box.appendChild(empty);
-    return;
-  }
-
-  vehicles.forEach(vehicle => {
-    const marker = L.marker([vehicle.lat, vehicle.lon]).addTo(map);
-    marker.bindPopup(`<b>🚌 ${vehicle.id}</b><br>Velocidade: ${vehicle.speed} km/h<br>Atualizado: ${vehicle.updated}`);
+  const box=document.getElementById("vehicles");
+  box.innerHTML=`<h3>Ônibus encontrados: ${vehicles.length}</h3>`;
+  vehicleMarkers.forEach(m=>map.removeLayer(m)); vehicleMarkers=[];
+  if(!vehicles.length){ box.innerHTML+=`<p>Nenhum ônibus desta linha foi localizado nos últimos ${LIVE_WINDOW_MINUTES} minutos.</p>`; return; }
+  vehicles.forEach(v=>{
+    const marker=L.marker([v.lat,v.lon]).addTo(map);
+    marker.bindPopup(`<b>🚌 ${v.id}</b><br>Velocidade: ${v.speed} km/h<br>Atualizado: ${v.updated}`);
     vehicleMarkers.push(marker);
-
-    const item = document.createElement("div");
-    item.className = "vehicle";
-    item.innerHTML = `<strong>🚌 ${vehicle.id}</strong><span>${vehicle.speed} km/h · ${vehicle.updated}</span>`;
-    item.onclick = () => {
-      map.setView([vehicle.lat, vehicle.lon], 15);
-      marker.openPopup();
-    };
-    box.appendChild(item);
+    const item=document.createElement("div"); item.className="vehicle";
+    item.innerHTML=`<strong>🚌 ${v.id}</strong><span>${v.speed} km/h · ${v.updated}</span>`;
+    item.onclick=()=>{map.setView([v.lat,v.lon],15);marker.openPopup();}; box.appendChild(item);
   });
 }
 
-function clearMap() {
-  if (routeLine) {
-    map.removeLayer(routeLine);
-    routeLine = null;
-  }
-  stopMarkers.forEach(marker => map.removeLayer(marker));
-  vehicleMarkers.forEach(marker => map.removeLayer(marker));
-  stopMarkers = [];
-  vehicleMarkers = [];
+function clearMap(){
+  if(routeLine){map.removeLayer(routeLine);routeLine=null;}
+  stopMarkers.forEach(m=>map.removeLayer(m)); vehicleMarkers.forEach(m=>map.removeLayer(m));
+  stopMarkers=[];vehicleMarkers=[];
 }
 
-document.getElementById("searchBtn").onclick = renderRouteSearchResults;
-document.getElementById("search").addEventListener("input", renderRouteSearchResults);
-document.getElementById("search").addEventListener("keydown", event => {
-  if (event.key === "Enter") renderRouteSearchResults();
-});
+document.getElementById("searchBtn").onclick=renderRouteSearchResults;
+document.getElementById("search").addEventListener("input",renderRouteSearchResults);
+document.getElementById("search").addEventListener("keydown",e=>{if(e.key==="Enter")renderRouteSearchResults();});
 
-setInterval(() => {
-  if (!selectedLine) return;
-  seconds--;
-  document.getElementById("countdown").textContent = Math.max(seconds, 0);
-  if (seconds <= 0) refreshVehicles();
-}, 1000);
-
+setInterval(()=>{if(!selectedLine)return;seconds--;document.getElementById("countdown").textContent=Math.max(seconds,0);if(seconds<=0)refreshVehicles();},1000);
 loadRoutes();
