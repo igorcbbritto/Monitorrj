@@ -91,6 +91,22 @@ h2 {
   margin-top: 18px;
 }
 
+.route-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.route-actions button {
+  min-height: 40px;
+  background: #eef1f5;
+  color: #172033;
+  border: 1px solid #d7dce4;
+}
+
+.route-actions button:hover { background: #e1e6ed; }
+
 .hidden { display: none; }
 
 .vehicle {
@@ -115,4 +131,5 @@ h2 {
   .layout { grid-template-columns: 1fr; height: auto; }
   .panel { max-height: 55vh; border-right: 0; }
   .map-area, #map { height: 55vh; }
+  .route-actions { grid-template-columns: 1fr; }
 }
