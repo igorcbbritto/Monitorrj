@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monitor de Ônibus</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>🚌 Monitor de Ônibus</h1>
+    <p>Rio de Janeiro · protótipo V1</p>
+  </div>
+  <span id="status" class="status">Pronto</span>
+</header>
+
+<main class="layout">
+  <aside class="panel">
+    <label for="search">Pesquisar linha</label>
+    <div class="search">
+      <input id="search" placeholder="Ex.: 457" autocomplete="off">
+      <button id="searchBtn">Buscar</button>
+    </div>
+
+    <h2>Linhas</h2>
+    <div id="routes" class="routes"></div>
+
+    <section id="details" class="details hidden">
+      <h2 id="routeTitle"></h2>
+      <p id="routeDirection"></p>
+      <div id="vehicles" class="vehicles"></div>
+      <div class="refresh">Atualização automática: <b id="countdown">20</b>s</div>
+    </section>
+  </aside>
+
+  <section class="map-area">
+    <div id="map"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
