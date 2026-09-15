@@ -13,12 +13,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: atualizar-gtfs-main
+  cancel-in-progress: false
+
 jobs:
   atualizar:
     runs-on: ubuntu-latest
     steps:
       - name: Baixar repositório
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Baixar GTFS oficial
         run: |
@@ -49,5 +55,7 @@ jobs:
             echo "GTFS sem alterações."
           else
             git commit -m "chore: atualizar cache GTFS por linha"
-            git push
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
           fi
