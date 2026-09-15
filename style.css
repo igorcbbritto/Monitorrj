@@ -1,0 +1,118 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f3f4f6;
+  color: #172033;
+}
+
+.topbar {
+  min-height: 72px;
+  padding: 14px 20px;
+  background: #172033;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.topbar h1 { margin: 0; font-size: 21px; }
+.topbar p { margin: 4px 0 0; opacity: .75; font-size: 13px; }
+
+.status {
+  background: rgba(255,255,255,.12);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.layout {
+  height: calc(100vh - 72px);
+  display: grid;
+  grid-template-columns: 360px 1fr;
+}
+
+.panel {
+  background: white;
+  padding: 20px;
+  overflow-y: auto;
+  border-right: 1px solid #ddd;
+}
+
+label { font-weight: 700; font-size: 13px; }
+
+.search {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+input {
+  min-width: 0;
+  flex: 1;
+  padding: 11px 12px;
+  border: 1px solid #ccd2dc;
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0 14px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+#searchBtn { background: #172033; color: white; }
+
+h2 {
+  font-size: 16px;
+  margin: 22px 0 10px;
+}
+
+.route {
+  width: 100%;
+  text-align: left;
+  padding: 13px;
+  margin-bottom: 8px;
+  background: #f7f8fa;
+  border: 1px solid #e1e5eb;
+  border-radius: 10px;
+}
+
+.route:hover { background: #eef1f5; }
+.route strong { display: block; font-size: 16px; }
+.route span { display: block; margin-top: 3px; font-size: 12px; color: #687386; }
+
+.details {
+  border-top: 1px solid #e1e5eb;
+  margin-top: 18px;
+}
+
+.hidden { display: none; }
+
+.vehicle {
+  padding: 12px;
+  border: 1px solid #e1e5eb;
+  border-radius: 9px;
+  margin: 8px 0;
+}
+
+.vehicle strong { display: block; }
+.vehicle span { color: #687386; font-size: 12px; }
+
+.refresh {
+  font-size: 12px;
+  color: #687386;
+  margin-top: 12px;
+}
+
+.map-area, #map { width: 100%; height: 100%; }
+
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .panel { max-height: 55vh; border-right: 0; }
+  .map-area, #map { height: 55vh; }
+}
