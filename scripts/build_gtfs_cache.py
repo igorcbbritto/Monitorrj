@@ -1,16 +1,22 @@
 import csv
 import json
 import os
+import shutil
 import sys
 import zipfile
+from datetime import datetime, timezone
 
 zip_path = sys.argv[1]
-out_path = sys.argv[2]
+out_dir = sys.argv[2]
 
 
 def rows(z, name):
     with z.open(name) as f:
         return csv.DictReader((line.decode('utf-8-sig', errors='replace') for line in f))
+
+if os.path.exists(out_dir):
+    shutil.rmtree(out_dir)
+os.makedirs(out_dir, exist_ok=True)
 
 with zipfile.ZipFile(zip_path) as z:
     routes = []
@@ -47,8 +53,6 @@ with zipfile.ZipFile(zip_path) as z:
                     'direction_id': direction,
                     'headsign': (t.get('trip_headsign') or '').strip(),
                     'shape_id': t.get('shape_id') or '',
-                    'service_id': t.get('service_id') or '',
-                    'trip_short_name': (t.get('trip_short_name') or '').strip(),
                 }
 
     route_data = {r['route_id']: {'route': r, 'trips': []} for r in routes}
@@ -62,7 +66,10 @@ with zipfile.ZipFile(zip_path) as z:
             tid = st.get('trip_id', '')
             if tid not in selected_trip_ids:
                 continue
-            seq = int(st.get('stop_sequence') or 0)
+            try:
+                seq = int(st.get('stop_sequence') or 0)
+            except ValueError:
+                seq = 0
             stop_refs.setdefault(tid, []).append((seq, st.get('stop_id', '')))
 
     needed_stop_ids = {sid for vals in stop_refs.values() for _, sid in vals if sid}
@@ -99,9 +106,12 @@ with zipfile.ZipFile(zip_path) as z:
                 continue
             shapes[sid].append((seq, [lat, lon]))
 
-    compact_routes = []
+    index = {
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'routes': routes,
+    }
+
     for rid, item in route_data.items():
-        route = item['route']
         trips = []
         for t in sorted(item['trips'], key=lambda x: x['direction_id']):
             trip_id = t['trip_id']
@@ -117,11 +127,11 @@ with zipfile.ZipFile(zip_path) as z:
                 'shape': shape,
                 'stops': trip_stops,
             })
-        compact_routes.append({**route, 'trips': trips})
 
-cache = {'generated_at': __import__('datetime').datetime.utcnow().isoformat() + 'Z', 'routes': compact_routes}
-os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-with open(out_path, 'w', encoding='utf-8') as f:
-    json.dump(cache, f, ensure_ascii=False, separators=(',', ':'))
+        with open(os.path.join(out_dir, f'{rid}.json'), 'w', encoding='utf-8') as f:
+            json.dump({'route_id': rid, 'trips': trips}, f, ensure_ascii=False, separators=(',', ':'))
 
-print(f'Cache gerado: {len(compact_routes)} linhas')
+    with open(os.path.join(out_dir, 'index.json'), 'w', encoding='utf-8') as f:
+        json.dump(index, f, ensure_ascii=False, separators=(',', ':'))
+
+print(f'Cache GTFS dividido em {len(routes)} linhas: {out_dir}/index.json + arquivos por route_id')
