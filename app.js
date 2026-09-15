@@ -27,9 +27,15 @@ function formatApiDate(date) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`API ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error(`API ${response.status} em ${url}`);
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function pageResults(data) {
@@ -39,6 +45,18 @@ function pageResults(data) {
   return [];
 }
 
+function normalizeNextUrl(next) {
+  if (!next) return null;
+  try {
+    const url = new URL(next, API_BASE);
+    // Evita mixed content caso o servidor devolva o link de paginação em HTTP.
+    url.protocol = "https:";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 async function apiGetAll(path, maxPages = 50) {
   let url = path.startsWith("http") ? path : `${API_BASE}${path}`;
   const all = [];
@@ -46,9 +64,7 @@ async function apiGetAll(path, maxPages = 50) {
   for (let page = 0; page < maxPages && url; page++) {
     const data = await fetchJson(url);
     all.push(...pageResults(data));
-
-    // DRF normalmente devolve "next" quando há paginação.
-    url = data && !Array.isArray(data) && data.next ? data.next : null;
+    url = data && !Array.isArray(data) ? normalizeNextUrl(data.next) : null;
   }
 
   return all;
@@ -57,7 +73,8 @@ async function apiGetAll(path, maxPages = 50) {
 async function loadRealRoutes() {
   if (routesCache.length) return routesCache;
 
-  const data = await apiGetAll("/gtfs/routes/");
+  // A API oficial usa DRF e pode paginar o GTFS. O paginador é seguido acima.
+  const data = await apiGetAll("/gtfs/routes/", 20);
   routesCache = data
     .map(route => ({
       route_id: route.route_id,
@@ -69,12 +86,13 @@ async function loadRealRoutes() {
     .filter(route => route.route_id && route.short_name)
     .sort((a, b) => a.short_name.localeCompare(b.short_name, "pt-BR", { numeric: true }));
 
+  if (!routesCache.length) throw new Error("A API respondeu, mas não retornou linhas GTFS.");
   return routesCache;
 }
 
 async function loadTripsForLine(line) {
   const encoded = encodeURIComponent(line);
-  return apiGetAll(`/gtfs/trips/?trip_short_name=${encoded}`);
+  return apiGetAll(`/gtfs/trips/?trip_short_name=${encoded}`, 30);
 }
 
 async function loadTripDetails(tripId) {
@@ -85,13 +103,12 @@ async function loadTripDetails(tripId) {
 
 async function loadStopsAndShapeForTrip(tripId) {
   const encoded = encodeURIComponent(tripId);
-  const stopTimes = await apiGetAll(`/gtfs/stop_times/?trip_id=${encoded}`, 20);
+  const stopTimes = await apiGetAll(`/gtfs/stop_times/?trip_id=${encoded}`, 30);
   const trip = await loadTripDetails(tripId);
 
   const orderedStopData = stopTimes
     .sort((a, b) => Number(a.stop_sequence ?? 0) - Number(b.stop_sequence ?? 0))
     .map(item => {
-      // O serializer oficial da SMTR devolve stop_id como objeto completo.
       const stop = item.stop_id;
       if (!stop || typeof stop !== "object") return null;
       return {
@@ -118,7 +135,6 @@ async function loadStopsAndShapeForTrip(tripId) {
 function searchRoutes(query = "") {
   const q = query.trim().toLowerCase();
   if (!q) return routesCache.slice(0, 100);
-
   return routesCache.filter(route =>
     route.short_name.toLowerCase().includes(q) ||
     route.long_name.toLowerCase().includes(q)
@@ -136,15 +152,15 @@ function addRouteButton(route) {
 async function loadRoutes() {
   const box = document.getElementById("routes");
   box.innerHTML = "<p>Carregando todas as linhas oficiais...</p>";
-  document.getElementById("status").textContent = "Carregando GTFS...";
+  document.getElementById("status").textContent = "Carregando GTFS oficial...";
 
   try {
     await loadRealRoutes();
     renderRouteSearchResults();
     document.getElementById("status").textContent = `SMTR · ${routesCache.length} linhas carregadas`;
   } catch (error) {
-    console.error(error);
-    box.innerHTML = "<p>Não foi possível carregar as linhas oficiais da SMTR.</p>";
+    console.error("Falha ao carregar GTFS SMTR:", error);
+    box.innerHTML = `<p>Não foi possível carregar o GTFS da SMTR.<br><small>${error.message || "Verifique a conexão e tente novamente."}</small></p>`;
     document.getElementById("status").textContent = "GTFS indisponível";
   }
 }
@@ -159,32 +175,24 @@ function renderRouteSearchResults() {
     box.innerHTML = "<p>Nenhuma linha oficial encontrada.</p>";
     return;
   }
-
   routes.forEach(addRouteButton);
 }
 
 async function selectRoute(route) {
   selectedLine = route.short_name;
   seconds = REFRESH_SECONDS;
-
   document.getElementById("details").classList.remove("hidden");
   document.getElementById("routeTitle").textContent = `Linha ${route.short_name}`;
   document.getElementById("routeDirection").textContent = route.long_name || "Dados oficiais da SMTR";
   document.getElementById("status").textContent = "Carregando trajeto oficial...";
-
   clearMap();
   document.getElementById("vehicles").innerHTML = "<p>Carregando trajeto e GPS...</p>";
 
   try {
     const trips = await loadTripsForLine(selectedLine);
     const validTrips = trips.filter(trip => trip.trip_id);
+    if (!validTrips.length) throw new Error(`A SMTR não retornou viagens GTFS para ${selectedLine}.`);
 
-    if (!validTrips.length) {
-      throw new Error(`A SMTR não retornou viagens GTFS para ${selectedLine}.`);
-    }
-
-    // Uma viagem por sentido. O primeiro sentido é desenhado agora;
-    // a lista de viagens fica disponível para a próxima evolução (ida/volta).
     const tripByDirection = new Map();
     validTrips.forEach(trip => {
       const direction = String(trip.direction_id ?? "0");
@@ -193,7 +201,6 @@ async function selectRoute(route) {
 
     const selectedTrip = [...tripByDirection.values()][0] || validTrips[0];
     const routeData = await loadStopsAndShapeForTrip(selectedTrip.trip_id);
-
     drawRoute(routeData.shape, routeData.stops);
     await refreshVehicles();
   } catch (error) {
@@ -238,38 +245,32 @@ function normalizeLiveVehicle(item) {
     }
   }
 
-  return {
-    id: item.id_veiculo ?? item.ordem ?? "Veículo",
-    lat,
-    lon,
-    speed: speed ?? 0,
-    updated,
-    timestamp
-  };
+  return { id: item.id_veiculo ?? item.ordem ?? "Veículo", lat, lon, speed: speed ?? 0, updated, timestamp };
+}
+
+function normalizeLine(value) {
+  return String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
 }
 
 async function fetchLiveVehicles(line) {
   const now = new Date();
   const start = new Date(now.getTime() - LIVE_WINDOW_MINUTES * 60 * 1000);
-  const params = new URLSearchParams({
-    dataInicial: formatApiDate(start),
-    dataFinal: formatApiDate(now)
-  });
+  const params = new URLSearchParams({ dataInicial: formatApiDate(start), dataFinal: formatApiDate(now) });
 
   const response = await fetch(`${GPS_API}?${params.toString()}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`GPS SMTR HTTP ${response.status}`);
 
   const data = await response.json();
   const rawItems = Array.isArray(data) ? data : (data.veiculos || data.data || []);
-
+  const wantedLine = normalizeLine(line);
   const latest = new Map();
+
   rawItems.forEach(item => {
-    const itemLine = String(item.servico ?? item.linha ?? item.route_short_name ?? "").trim();
-    if (itemLine !== String(line).trim()) return;
+    const itemLine = normalizeLine(item.servico ?? item.linha ?? item.route_short_name);
+    if (itemLine !== wantedLine) return;
 
     const vehicle = normalizeLiveVehicle(item);
     if (!vehicle) return;
-
     const key = String(vehicle.id);
     const previous = latest.get(key);
     if (!previous || vehicle.timestamp >= previous.timestamp) latest.set(key, vehicle);
@@ -280,7 +281,6 @@ async function fetchLiveVehicles(line) {
 
 async function refreshVehicles() {
   if (!selectedLine) return;
-
   document.getElementById("status").textContent = "Atualizando GPS...";
 
   try {
@@ -292,14 +292,12 @@ async function refreshVehicles() {
     document.getElementById("status").textContent = "GPS indisponível";
     renderVehicles([]);
   }
-
   seconds = REFRESH_SECONDS;
 }
 
 function renderVehicles(vehicles) {
   const box = document.getElementById("vehicles");
   box.innerHTML = `<h3>Ônibus encontrados: ${vehicles.length}</h3>`;
-
   vehicleMarkers.forEach(marker => map.removeLayer(marker));
   vehicleMarkers = [];
 
