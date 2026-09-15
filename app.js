@@ -10,9 +10,10 @@ let routeLine = null;
 let stopMarkers = [];
 let vehicleMarkers = [];
 let routesCache = [];
-let gtfsCache = null;
+let gtfsIndex = null;
 let selectedLine = null;
 let selectedRoute = null;
+let selectedRouteData = null;
 let seconds = REFRESH_SECONDS;
 let dataSource = "";
 
@@ -57,22 +58,21 @@ async function apiGetAll(path, maxPages = 50) {
   return all;
 }
 
-async function loadLocalGtfs() {
-  if (gtfsCache) return gtfsCache;
-  const data = await fetchJson(`./gtfs-cache.json?v=${Date.now()}`);
-  if (!Array.isArray(data.routes) || !data.routes.length) throw new Error("Cache GTFS vazio.");
-  gtfsCache = data;
+async function loadLocalGtfsIndex() {
+  if (gtfsIndex) return gtfsIndex;
+  const data = await fetchJson(`./gtfs-routes/index.json?v=${Date.now()}`);
+  if (!Array.isArray(data.routes) || !data.routes.length) throw new Error("Índice GTFS vazio.");
+  gtfsIndex = data;
   return data;
 }
 
-function mapCacheRoutes(data) {
+function mapIndexRoutes(data) {
   return data.routes.map(route => ({
     route_id: route.route_id,
     short_name: String(route.short_name || "").trim(),
     long_name: String(route.long_name || "").trim(),
     color: route.color || null,
-    text_color: route.text_color || null,
-    trips: route.trips || []
+    text_color: route.text_color || null
   })).filter(r => r.route_id && r.short_name)
     .sort((a, b) => a.short_name.localeCompare(b.short_name, "pt-BR", { numeric: true }));
 }
@@ -92,9 +92,9 @@ async function loadRealRoutes() {
     routesCache = routes;
     dataSource = "API SMTR";
   } catch (apiError) {
-    console.warn("API GTFS indisponível, usando cache local:", apiError);
-    const local = await loadLocalGtfs();
-    routesCache = mapCacheRoutes(local);
+    console.warn("API GTFS indisponível, usando índice GTFS local:", apiError);
+    const local = await loadLocalGtfsIndex();
+    routesCache = mapIndexRoutes(local);
     dataSource = "cache GTFS oficial";
   }
   return routesCache;
@@ -122,9 +122,11 @@ function renderRouteSearchResults() {
   routes.forEach(addRouteButton);
 }
 
-function getCachedTrip(route) {
-  if (!route?.trips?.length) return null;
-  return route.trips[0];
+async function loadCachedRouteData(route) {
+  const data = await fetchJson(`./gtfs-routes/${encodeURIComponent(route.route_id)}.json?v=${Date.now()}`);
+  if (!Array.isArray(data.trips) || !data.trips.length) throw new Error(`Esta linha não possui trajeto no cache GTFS.`);
+  const trip = data.trips[0];
+  return { shape: trip.shape || [], stops: trip.stops || [], trip };
 }
 
 async function loadApiTripData(line) {
@@ -151,18 +153,18 @@ async function loadApiTripData(line) {
 
 async function getRouteData(route) {
   if (dataSource === "cache GTFS oficial") {
-    const trip = getCachedTrip(route);
-    if (!trip) throw new Error("Esta linha não possui trajeto no cache GTFS.");
-    return { shape: trip.shape || [], stops: trip.stops || [], trip };
+    return loadCachedRouteData(route);
   }
-  try { return await loadApiTripData(route.short_name); }
-  catch (e) {
-    const local = await loadLocalGtfs();
-    const cached = mapCacheRoutes(local).find(r => r.short_name === route.short_name);
-    const trip = getCachedTrip(cached);
-    if (!trip) throw e;
-    dataSource = "cache GTFS oficial";
-    return { shape: trip.shape || [], stops: trip.stops || [], trip };
+  try {
+    return await loadApiTripData(route.short_name);
+  } catch (e) {
+    try {
+      const local = await loadCachedRouteData(route);
+      dataSource = "cache GTFS oficial";
+      return local;
+    } catch (_) {
+      throw e;
+    }
   }
 }
 
@@ -175,7 +177,7 @@ async function loadRoutes() {
     renderRouteSearchResults();
     document.getElementById("status").textContent = `SMTR · ${routesCache.length} linhas · ${dataSource}`;
   } catch (error) {
-    console.error(error);
+    console.error("Falha ao carregar GTFS:", error);
     box.innerHTML = `<p>Não foi possível carregar as linhas.<br><small>${error.message || "Tente novamente."}</small></p>`;
     document.getElementById("status").textContent = "Dados GTFS indisponíveis";
   }
@@ -192,11 +194,11 @@ async function selectRoute(route) {
   clearMap();
   document.getElementById("vehicles").innerHTML = "<p>Carregando trajeto e GPS...</p>";
   try {
-    const routeData = await getRouteData(route);
-    drawRoute(routeData.shape, routeData.stops);
+    selectedRouteData = await getRouteData(route);
+    drawRoute(selectedRouteData.shape, selectedRouteData.stops);
     await refreshVehicles();
   } catch (error) {
-    console.error(error);
+    console.error("Falha ao carregar trajeto:", error);
     document.getElementById("status").textContent = "Trajeto indisponível";
     document.getElementById("vehicles").innerHTML = `<p>${error.message || "Não foi possível carregar o trajeto."}</p>`;
   }
