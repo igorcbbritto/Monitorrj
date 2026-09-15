@@ -11,7 +11,7 @@
 <header class="topbar">
   <div>
     <h1>🚌 Monitor de Ônibus</h1>
-    <p>Rio de Janeiro · protótipo V1</p>
+    <p>Rio de Janeiro · dados oficiais</p>
   </div>
   <span id="status" class="status">Pronto</span>
 </header>
@@ -20,7 +20,7 @@
   <aside class="panel">
     <label for="search">Pesquisar linha</label>
     <div class="search">
-      <input id="search" placeholder="Ex.: 457" autocomplete="off">
+      <input id="search" placeholder="Ex.: 755D" autocomplete="off">
       <button id="searchBtn">Buscar</button>
     </div>
 
@@ -31,7 +31,7 @@
       <h2 id="routeTitle"></h2>
       <p id="routeDirection"></p>
       <div id="vehicles" class="vehicles"></div>
-      <div class="refresh">Atualização automática: <b id="countdown">20</b>s</div>
+      <div class="refresh">Atualização automática: <b id="countdown">60</b>s</div>
     </section>
   </aside>
 
@@ -41,6 +41,8 @@
 </main>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.5.3/papaparse.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
