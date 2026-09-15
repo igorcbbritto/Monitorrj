@@ -97,6 +97,27 @@ async function getRouteData(route) {
   return loadCachedRouteData(route);
 }
 
+function buildGoogleTrafficUrl() {
+  const center = map.getCenter();
+  return `https://www.google.com/maps/@?api=1&map_action=map&center=${center.lat},${center.lng}&zoom=13&layer=traffic`;
+}
+
+function buildGoogleDirectionsUrl() {
+  const stops = selectedRouteData?.stops || [];
+  if (stops.length < 2) return "https://www.google.com/maps/";
+  const first = stops[0], last = stops[stops.length - 1];
+  return `https://www.google.com/maps/dir/?api=1&origin=${first.lat},${first.lon}&destination=${last.lat},${last.lon}&travelmode=transit`;
+}
+
+function setupRouteActions() {
+  const actions = document.getElementById("routeActions");
+  const trafficBtn = document.getElementById("trafficBtn");
+  const directionsBtn = document.getElementById("directionsBtn");
+  actions.classList.remove("hidden");
+  trafficBtn.onclick = () => window.open(buildGoogleTrafficUrl(), "_blank", "noopener");
+  directionsBtn.onclick = () => window.open(buildGoogleDirectionsUrl(), "_blank", "noopener");
+}
+
 async function loadRoutes() {
   const box = document.getElementById("routes");
   box.innerHTML = "<p>Carregando linhas oficiais...</p>";
@@ -120,11 +141,13 @@ async function selectRoute(route) {
   document.getElementById("routeTitle").textContent = `Linha ${route.short_name}`;
   document.getElementById("routeDirection").textContent = route.long_name || "Dados oficiais da SMTR";
   document.getElementById("status").textContent = "Carregando trajeto...";
+  document.getElementById("routeActions").classList.add("hidden");
   clearMap();
   document.getElementById("vehicles").innerHTML = "<p>Carregando trajeto e GPS...</p>";
   try {
     selectedRouteData = await getRouteData(route);
     drawRoute(selectedRouteData.shape, selectedRouteData.stops);
+    setupRouteActions();
     await refreshVehicles();
   } catch (error) {
     console.error("Falha ao carregar trajeto:", error);
