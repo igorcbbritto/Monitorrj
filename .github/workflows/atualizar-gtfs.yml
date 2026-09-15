@@ -1,0 +1,40 @@
+name: Atualizar cache GTFS
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Baixar GTFS oficial
+        run: |
+          set -e
+          mkdir -p /tmp/gtfs
+          curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+            "https://www.arcgis.com/sharing/rest/content/items/8ffe62ad3b2f42e49814bf941654ea6c/data" \
+            -o /tmp/gtfs/oficial.zip
+          unzip -t /tmp/gtfs/oficial.zip >/dev/null
+
+      - name: Gerar cache compacto
+        run: python scripts/build_gtfs_cache.py /tmp/gtfs/oficial.zip gtfs-cache.json
+
+      - name: Publicar cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gtfs-cache.json
+          if git diff --cached --quiet; then
+            echo "GTFS sem alterações."
+          else
+            git commit -m "chore: atualizar cache GTFS"
+            git push
+          fi
