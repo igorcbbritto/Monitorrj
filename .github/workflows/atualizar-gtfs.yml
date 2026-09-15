@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore:
       - gtfs-cache.json
+      - gtfs-routes/**
   workflow_dispatch:
   schedule:
     - cron: "17 6 * * *"
@@ -23,9 +24,6 @@ jobs:
         run: |
           set -e
           mkdir -p /tmp/gtfs
-
-          # Fonte oficial da SMTR. O ArcGIS está respondendo 403 no runner do GitHub,
-          # então usamos o espelho da MobilityDatabase como fallback.
           if curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
             "https://www.arcgis.com/sharing/rest/content/items/8ffe62ad3b2f42e49814bf941654ea6c/data" \
             -o /tmp/gtfs/oficial.zip; then
@@ -36,20 +34,21 @@ jobs:
               "https://files.mobilitydatabase.org/mdb-1791/mdb-1791-202608080056/mdb-1791-202608080056.zip" \
               -o /tmp/gtfs/oficial.zip
           fi
-
           unzip -t /tmp/gtfs/oficial.zip >/dev/null
 
-      - name: Gerar cache compacto
-        run: python scripts/build_gtfs_cache.py /tmp/gtfs/oficial.zip gtfs-cache.json
+      - name: Gerar cache dividido
+        run: python scripts/build_gtfs_cache.py /tmp/gtfs/oficial.zip gtfs-routes
 
       - name: Publicar cache
         run: |
+          set -e
+          rm -f gtfs-cache.json
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add gtfs-cache.json
+          git add -A gtfs-routes gtfs-cache.json
           if git diff --cached --quiet; then
             echo "GTFS sem alterações."
           else
-            git commit -m "chore: atualizar cache GTFS"
+            git commit -m "chore: atualizar cache GTFS por linha"
             git push
           fi
