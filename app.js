@@ -13,7 +13,6 @@ let routeLine = null;
 let stopMarkers = [];
 let vehicleMarkers = [];
 let routesCache = [];
-let selectedRoute = null;
 let selectedLine = null;
 let seconds = REFRESH_SECONDS;
 
@@ -27,24 +26,39 @@ function formatApiDate(date) {
   return date.toISOString().slice(0, 19).replace("T", "+");
 }
 
-async function apiGet(path) {
-  const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`API ${response.status}`);
   return response.json();
 }
 
-function getResults(data) {
+function pageResults(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data.results)) return data.results;
   if (Array.isArray(data.data)) return data.data;
   return [];
 }
 
+async function apiGetAll(path, maxPages = 50) {
+  let url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const all = [];
+
+  for (let page = 0; page < maxPages && url; page++) {
+    const data = await fetchJson(url);
+    all.push(...pageResults(data));
+
+    // DRF normalmente devolve "next" quando há paginação.
+    url = data && !Array.isArray(data) && data.next ? data.next : null;
+  }
+
+  return all;
+}
+
 async function loadRealRoutes() {
   if (routesCache.length) return routesCache;
 
-  const data = await apiGet("/gtfs/routes/");
-  routesCache = getResults(data)
+  const data = await apiGetAll("/gtfs/routes/");
+  routesCache = data
     .map(route => ({
       route_id: route.route_id,
       short_name: String(route.route_short_name ?? "").trim(),
@@ -60,66 +74,55 @@ async function loadRealRoutes() {
 
 async function loadTripsForLine(line) {
   const encoded = encodeURIComponent(line);
-  const data = await apiGet(`/gtfs/trips/?trip_short_name=${encoded}`);
-  return getResults(data);
+  return apiGetAll(`/gtfs/trips/?trip_short_name=${encoded}`);
+}
+
+async function loadTripDetails(tripId) {
+  const encoded = encodeURIComponent(tripId);
+  const trips = await apiGetAll(`/gtfs/trips/?trip_id=${encoded}`, 5);
+  return trips[0] || null;
 }
 
 async function loadStopsAndShapeForTrip(tripId) {
   const encoded = encodeURIComponent(tripId);
+  const stopTimes = await apiGetAll(`/gtfs/stop_times/?trip_id=${encoded}`, 20);
+  const trip = await loadTripDetails(tripId);
 
-  const [stopTimesData, tripData] = await Promise.all([
-    apiGet(`/gtfs/stop_times/?trip_id=${encoded}`),
-    apiGet(`/gtfs/trips/?trip_id=${encoded}`)
-  ]);
-
-  const stopTimes = getResults(stopTimesData)
-    .sort((a, b) => Number(a.stop_sequence ?? 0) - Number(b.stop_sequence ?? 0));
-
-  const trip = getResults(tripData)[0] || null;
-  const shapeId = trip?.shape_id;
+  const orderedStopData = stopTimes
+    .sort((a, b) => Number(a.stop_sequence ?? 0) - Number(b.stop_sequence ?? 0))
+    .map(item => {
+      // O serializer oficial da SMTR devolve stop_id como objeto completo.
+      const stop = item.stop_id;
+      if (!stop || typeof stop !== "object") return null;
+      return {
+        id: stop.stop_id,
+        name: stop.stop_name || "Parada sem nome",
+        lat: normalizeNumber(stop.stop_lat),
+        lon: normalizeNumber(stop.stop_lon)
+      };
+    })
+    .filter(stop => stop && stop.lat !== null && stop.lon !== null);
 
   let shape = [];
-  if (shapeId) {
-    const shapeData = await apiGet(`/gtfs/shapes/?shape_id=${encodeURIComponent(shapeId)}`);
-    shape = getResults(shapeData)
+  if (trip?.shape_id) {
+    const shapeData = await apiGetAll(`/gtfs/shapes/?shape_id=${encodeURIComponent(trip.shape_id)}`, 30);
+    shape = shapeData
       .sort((a, b) => Number(a.shape_pt_sequence ?? 0) - Number(b.shape_pt_sequence ?? 0))
       .map(point => [normalizeNumber(point.shape_pt_lat), normalizeNumber(point.shape_pt_lon)])
       .filter(point => point[0] !== null && point[1] !== null);
   }
 
-  const stopIds = [...new Set(stopTimes.map(item => item.stop_id).filter(Boolean))];
-  const stops = [];
-
-  // A linha pode ter muitos pontos. O endpoint aceita stop_id e permite buscar em lote.
-  for (let i = 0; i < stopIds.length; i += 80) {
-    const batch = stopIds.slice(i, i + 80).join(",");
-    const stopsData = await apiGet(`/gtfs/stops/?stop_id=${encodeURIComponent(batch)}`);
-    stops.push(...getResults(stopsData));
-  }
-
-  const stopsById = new Map(stops.map(stop => [String(stop.stop_id), stop]));
-  const orderedStops = stopTimes
-    .map(item => stopsById.get(String(item.stop_id)))
-    .filter(Boolean)
-    .map(stop => ({
-      id: stop.stop_id,
-      name: stop.stop_name || "Parada sem nome",
-      lat: normalizeNumber(stop.stop_lat),
-      lon: normalizeNumber(stop.stop_lon)
-    }))
-    .filter(stop => stop.lat !== null && stop.lon !== null);
-
-  return { shape, stops: orderedStops, trip };
+  return { shape, stops: orderedStopData, trip };
 }
 
 function searchRoutes(query = "") {
   const q = query.trim().toLowerCase();
-  if (!q) return routesCache.slice(0, 80);
+  if (!q) return routesCache.slice(0, 100);
 
   return routesCache.filter(route =>
     route.short_name.toLowerCase().includes(q) ||
     route.long_name.toLowerCase().includes(q)
-  ).slice(0, 80);
+  ).slice(0, 100);
 }
 
 function addRouteButton(route) {
@@ -132,13 +135,13 @@ function addRouteButton(route) {
 
 async function loadRoutes() {
   const box = document.getElementById("routes");
-  box.innerHTML = "<p>Carregando linhas oficiais...</p>";
+  box.innerHTML = "<p>Carregando todas as linhas oficiais...</p>";
   document.getElementById("status").textContent = "Carregando GTFS...";
 
   try {
     await loadRealRoutes();
     renderRouteSearchResults();
-    document.getElementById("status").textContent = "Linhas oficiais · SMTR";
+    document.getElementById("status").textContent = `SMTR · ${routesCache.length} linhas carregadas`;
   } catch (error) {
     console.error(error);
     box.innerHTML = "<p>Não foi possível carregar as linhas oficiais da SMTR.</p>";
@@ -161,14 +164,13 @@ function renderRouteSearchResults() {
 }
 
 async function selectRoute(route) {
-  selectedRoute = route;
   selectedLine = route.short_name;
   seconds = REFRESH_SECONDS;
 
   document.getElementById("details").classList.remove("hidden");
   document.getElementById("routeTitle").textContent = `Linha ${route.short_name}`;
   document.getElementById("routeDirection").textContent = route.long_name || "Dados oficiais da SMTR";
-  document.getElementById("status").textContent = "Carregando trajeto...";
+  document.getElementById("status").textContent = "Carregando trajeto oficial...";
 
   clearMap();
   document.getElementById("vehicles").innerHTML = "<p>Carregando trajeto e GPS...</p>";
@@ -178,10 +180,11 @@ async function selectRoute(route) {
     const validTrips = trips.filter(trip => trip.trip_id);
 
     if (!validTrips.length) {
-      throw new Error("Nenhuma viagem GTFS encontrada para esta linha.");
+      throw new Error(`A SMTR não retornou viagens GTFS para ${selectedLine}.`);
     }
 
-    // Usa uma viagem de cada sentido para permitir visualizar ida/volta.
+    // Uma viagem por sentido. O primeiro sentido é desenhado agora;
+    // a lista de viagens fica disponível para a próxima evolução (ida/volta).
     const tripByDirection = new Map();
     validTrips.forEach(trip => {
       const direction = String(trip.direction_id ?? "0");
@@ -259,8 +262,6 @@ async function fetchLiveVehicles(line) {
   const data = await response.json();
   const rawItems = Array.isArray(data) ? data : (data.veiculos || data.data || []);
 
-  // A API pode devolver vários registros do mesmo ônibus na janela de 5 minutos.
-  // Mantemos somente o registro mais recente de cada veículo e filtramos pela linha.
   const latest = new Map();
   rawItems.forEach(item => {
     const itemLine = String(item.servico ?? item.linha ?? item.route_short_name ?? "").trim();
