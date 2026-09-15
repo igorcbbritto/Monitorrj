@@ -34,6 +34,7 @@ with zipfile.ZipFile(zip_path) as z:
                 'long_name': (r.get('route_long_name') or '').strip(),
                 'color': r.get('route_color') or None,
                 'text_color': r.get('route_text_color') or None,
+                'cache_file': f'{rid}.json',
             })
 
     selected = {}
